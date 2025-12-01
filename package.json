@@ -1,0 +1,11 @@
+{
+  "name": "phg-phone-api",
+  "version": "1.0.0",
+  "description": "Phone lookup database API for PHG",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "mongodb": "^6.3.0"
+  }
+}
