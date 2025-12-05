@@ -8,6 +8,15 @@ const COLLECTION_NAME = 'phones';
 // Simple password protection - set in Vercel environment variables
 const UPLOAD_PASSWORD = process.env.UPLOAD_PASSWORD || 'phg2024';
 
+// Priority types that take precedence over POSS POE
+const HIGH_PRIORITY_TYPES = ['DEBTOR', 'RELATIVE'];
+
+// Check if a phone document has any high-priority person types
+function hasHigherPriorityType(existingDoc) {
+  if (!existingDoc || !existingDoc.persons) return false;
+  return existingDoc.persons.some(p => HIGH_PRIORITY_TYPES.includes(p.type));
+}
+
 let cachedClient = null;
 
 async function connectToDatabase() {
@@ -61,6 +70,7 @@ module.exports = async function handler(req, res) {
     // Statistics
     let inserted = 0;
     let updated = 0;
+    let skipped = 0;
     let errors = 0;
 
     // Process each phone record
@@ -83,6 +93,12 @@ module.exports = async function handler(req, res) {
 
         // Check if phone already exists
         const existingDoc = await collection.findOne({ _id: cleanPhone });
+
+        // Priority check: Skip POSS POE if phone already has DEBTOR or RELATIVE
+        if (person.type === 'POSS POE' && hasHigherPriorityType(existingDoc)) {
+          skipped++;
+          continue;
+        }
 
         if (existingDoc) {
           // Check if this person already exists for this phone
@@ -139,6 +155,7 @@ module.exports = async function handler(req, res) {
         processed: phoneRecords.length,
         inserted,
         updated,
+        skipped,
         errors,
         totalInDatabase: totalCount
       }
