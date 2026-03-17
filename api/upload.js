@@ -1,21 +1,12 @@
 const { MongoClient } = require('mongodb');
 
-// MongoDB connection string - will be set as environment variable in Vercel
+// MongoDB connection string - set as environment variable in Vercel
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = 'phoneLookups';
 const COLLECTION_NAME = 'phones';
 
 // Simple password protection - set in Vercel environment variables
 const UPLOAD_PASSWORD = process.env.UPLOAD_PASSWORD || 'phg2024';
-
-// Priority types that take precedence over POSS POE
-const HIGH_PRIORITY_TYPES = ['DEBTOR', 'RELATIVE'];
-
-// Check if a phone document has any high-priority person types
-function hasHigherPriorityType(existingDoc) {
-  if (!existingDoc || !existingDoc.persons) return false;
-  return existingDoc.persons.some(p => HIGH_PRIORITY_TYPES.includes(p.type));
-}
 
 let cachedClient = null;
 
@@ -70,80 +61,140 @@ module.exports = async function handler(req, res) {
     // Statistics
     let inserted = 0;
     let updated = 0;
-    let skipped = 0;
     let errors = 0;
+    const failedRecords = [];
+    const now = new Date().toISOString();
 
-    // Process each phone record
+    // ── Step 1: Clean and validate all records, group by phone ──
+    // Map: cleanPhone → array of person objects
+    const phoneMap = new Map();
+
     for (const record of phoneRecords) {
       try {
         const { phone, person } = record;
-        
+
         if (!phone || phone.length < 10) {
           errors++;
+          failedRecords.push({ ...record, error: 'Invalid phone number (too short)' });
           continue;
         }
 
-        // Clean the phone number (last 10 digits only)
         const cleanPhone = phone.replace(/\D/g, '').slice(-10);
-        
+
         if (cleanPhone.length !== 10) {
           errors++;
+          failedRecords.push({ ...record, error: 'Invalid phone number (not 10 digits after cleaning)' });
           continue;
         }
 
-        // Check if phone already exists
-        const existingDoc = await collection.findOne({ _id: cleanPhone });
+        if (!phoneMap.has(cleanPhone)) {
+          phoneMap.set(cleanPhone, []);
+        }
+        phoneMap.get(cleanPhone).push(person);
+      } catch (err) {
+        errors++;
+        failedRecords.push({ ...record, error: err.message });
+      }
+    }
 
-        // Priority check: Skip POSS POE if phone already has DEBTOR or RELATIVE
-        if (person.type === 'POSS POE' && hasHigherPriorityType(existingDoc)) {
-          skipped++;
-          continue;
+    // ── Step 2: Fetch all existing docs in one query ──
+    const phoneNumbers = Array.from(phoneMap.keys());
+    const existingDocs = await collection
+      .find({ _id: { $in: phoneNumbers } })
+      .project({ _id: 1, persons: 1 })
+      .toArray();
+
+    // Build a lookup map: phone → existing persons array
+    const existingMap = new Map();
+    for (const doc of existingDocs) {
+      existingMap.set(doc._id, doc.persons || []);
+    }
+
+    // ── Step 3: Build bulkWrite operations ──
+    const operations = [];
+
+    for (const [cleanPhone, newPersons] of phoneMap) {
+      const existingPersons = existingMap.get(cleanPhone);
+
+      if (!existingPersons) {
+        // Phone doesn't exist — insert new document
+        // Deduplicate persons within this batch by name+type
+        const uniquePersons = [];
+        const seen = new Set();
+        for (const p of newPersons) {
+          const key = (p.name || '') + '|' + (p.type || '');
+          if (!seen.has(key)) {
+            seen.add(key);
+            uniquePersons.push(p);
+          }
         }
 
-        if (existingDoc) {
-          // Check if this person already exists for this phone
-          const personExists = existingDoc.persons.some(
-            p => p.name === person.name && p.type === person.type
+        operations.push({
+          insertOne: {
+            document: {
+              _id: cleanPhone,
+              phone: cleanPhone,
+              persons: uniquePersons,
+              createdAt: now,
+              updatedAt: now
+            }
+          }
+        });
+        inserted++;
+      } else {
+        // Phone exists — figure out which persons to add/update
+        const personsToAdd = [];
+        let personsUpdated = false;
+
+        for (const newPerson of newPersons) {
+          // Check if this person (by name+type) already exists
+          const existingIdx = existingPersons.findIndex(
+            p => p.name === newPerson.name && p.type === newPerson.type
           );
 
-          if (!personExists) {
-            // Add new person to existing phone
-            await collection.updateOne(
-              { _id: cleanPhone },
-              { 
-                $push: { persons: person },
-                $set: { updatedAt: new Date().toISOString() }
-              }
+          if (existingIdx === -1) {
+            // Person doesn't exist for this phone — add them
+            // But deduplicate within the batch itself
+            const alreadyAdding = personsToAdd.some(
+              p => p.name === newPerson.name && p.type === newPerson.type
             );
-            updated++;
+            if (!alreadyAdding) {
+              personsToAdd.push(newPerson);
+            }
           } else {
-            // Person already exists, update their info
-            await collection.updateOne(
-              { _id: cleanPhone, "persons.name": person.name, "persons.type": person.type },
-              { 
-                $set: { 
-                  "persons.$": person,
-                  updatedAt: new Date().toISOString()
-                }
-              }
-            );
-            updated++;
+            // Person exists — update their info in place
+            existingPersons[existingIdx] = newPerson;
+            personsUpdated = true;
           }
-        } else {
-          // Insert new phone record
-          await collection.insertOne({
-            _id: cleanPhone,
-            phone: cleanPhone,
-            persons: [person],
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          });
-          inserted++;
         }
-      } catch (err) {
-        console.error('Error processing record:', err);
-        errors++;
+
+        // Build the update operation
+        const updateOps = { $set: { updatedAt: now } };
+
+        if (personsUpdated) {
+          // Overwrite the full persons array with updated entries + new additions
+          updateOps.$set.persons = [...existingPersons, ...personsToAdd];
+        } else if (personsToAdd.length > 0) {
+          // Just push new persons (more efficient than replacing the whole array)
+          updateOps.$push = { persons: { $each: personsToAdd } };
+        }
+
+        // Only add an operation if something actually changed
+        if (personsUpdated || personsToAdd.length > 0) {
+          operations.push({
+            updateOne: {
+              filter: { _id: cleanPhone },
+              update: updateOps
+            }
+          });
+          updated++;
+        }
       }
+    }
+
+    // ── Step 4: Execute bulkWrite in one shot ──
+    if (operations.length > 0) {
+      await collection.bulkWrite(operations, { ordered: false });
     }
 
     // Get total count
@@ -155,10 +206,10 @@ module.exports = async function handler(req, res) {
         processed: phoneRecords.length,
         inserted,
         updated,
-        skipped,
         errors,
         totalInDatabase: totalCount
-      }
+      },
+      failedRecords: failedRecords.length > 0 ? failedRecords : undefined
     });
 
   } catch (error) {
