@@ -34,6 +34,45 @@ Look up a phone number.
 ### GET /api/stats
 Get database statistics.
 
+### POST /api/simplicity/file-search
+Search Simplicity by file number (proxy for AutoSearch Chrome extension).
+
+**Request Body:**
+```json
+{
+  "fileNumber": "25-12345"
+}
+```
+
+**Query Parameter Alternative:**
+```
+GET /api/simplicity/file-search?fileNumber=25-12345
+```
+
+**Optional Header:**
+```
+X-PHG-Extension-Key: <your-extension-gate-key>
+```
+(Only required if `EXTENSION_GATE_KEY` environment variable is set)
+
+**Response (Success):**
+```json
+{
+  "ok": true,
+  "internalId": "123456",
+  "accountUrl": "https://app.simplicitycollect.com/MasterView.aspx?case_id=123456",
+  "debtorName": "John Doe"
+}
+```
+
+**Response (Not Found):**
+```json
+{
+  "ok": false,
+  "error": "No debtor found for this file number"
+}
+```
+
 ---
 
 ## Deployment to Vercel
@@ -49,6 +88,8 @@ Get database statistics.
 4. Before deploying, add Environment Variables:
    - `MONGODB_URI` = `mongodb+srv://phg-uploader:YOUR_PASSWORD@phg-cluster.kajcdjc.mongodb.net/phoneLookups?retryWrites=true&w=majority`
    - `UPLOAD_PASSWORD` = `your-secure-password-here`
+   - `SIMPLICITY_API_TOKEN` = `your-simplicity-api-token` (required for file search)
+   - `EXTENSION_GATE_KEY` = `your-extension-key` (optional, for extension authentication)
 5. Click "Deploy"
 
 ### Step 3: Test Your API
@@ -56,12 +97,17 @@ After deployment, your API will be at:
 - `https://your-project-name.vercel.app/api/upload`
 - `https://your-project-name.vercel.app/api/lookup`
 - `https://your-project-name.vercel.app/api/stats`
+- `https://your-project-name.vercel.app/api/simplicity/file-search`
 
 ---
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `MONGODB_URI` | Your MongoDB Atlas connection string |
-| `UPLOAD_PASSWORD` | Password required to upload data |
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `MONGODB_URI` | Your MongoDB Atlas connection string | Yes |
+| `UPLOAD_PASSWORD` | Password required to upload data | Yes |
+| `SIMPLICITY_API_TOKEN` | Simplicity API token for file search | Yes (for file-search) |
+| `EXTENSION_GATE_KEY` | Optional authentication key for Chrome extension | No |
+
+**Note:** Set these environment variables in the Vercel project `phg-phone-api` under Settings → Environment Variables → Production.
