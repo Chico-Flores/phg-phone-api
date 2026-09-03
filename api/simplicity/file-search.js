@@ -62,12 +62,7 @@ module.exports = async function handler(req, res) {
       },
       body: JSON.stringify({
         ApiToken: simplicityToken,
-        DebtorCustomFields: [
-          {
-            FieldName: 'File Number',
-            FieldValue: fileNumber
-          }
-        ]
+        AccountNumber: fileNumber
       })
     });
 
@@ -114,11 +109,18 @@ module.exports = async function handler(req, res) {
       debtorName = [debtor.first_name, debtor.last_name].filter(Boolean).join(' ');
     }
 
+    // Get account number if available
+    let accountNumber = null;
+    if (debtor.accountList && debtor.accountList[0] && debtor.accountList[0].AccountNumber) {
+      accountNumber = debtor.accountList[0].AccountNumber;
+    }
+
     // Return success response
     return res.status(200).json({
       ok: true,
       internalId: internalId,
       accountUrl: `https://app.simplicitycollect.com/MasterView.aspx?case_id=${internalId}`,
+      ...(accountNumber && { accountNumber }),
       ...(debtorName && { debtorName })
     });
 

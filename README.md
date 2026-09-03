@@ -35,18 +35,18 @@ Look up a phone number.
 Get database statistics.
 
 ### POST /api/simplicity/file-search
-Search Simplicity by file number (proxy for AutoSearch Chrome extension).
+Search Simplicity by account number (proxy for AutoSearch Chrome extension).
 
 **Request Body:**
 ```json
 {
-  "fileNumber": "25-12345"
+  "fileNumber": "26-25163849"
 }
 ```
 
 **Query Parameter Alternative:**
 ```
-GET /api/simplicity/file-search?fileNumber=25-12345
+GET /api/simplicity/file-search?fileNumber=26-25163849
 ```
 
 **Optional Header:**
@@ -59,8 +59,9 @@ X-PHG-Extension-Key: <your-extension-gate-key>
 ```json
 {
   "ok": true,
-  "internalId": "123456",
-  "accountUrl": "https://app.simplicitycollect.com/MasterView.aspx?case_id=123456",
+  "internalId": "2521694",
+  "accountUrl": "https://app.simplicitycollect.com/MasterView.aspx?case_id=2521694",
+  "accountNumber": "26-25163849",
   "debtorName": "John Doe"
 }
 ```
@@ -72,6 +73,8 @@ X-PHG-Extension-Key: <your-extension-gate-key>
   "error": "No debtor found for this file number"
 }
 ```
+
+**Note:** The proxy accepts `fileNumber` as the parameter name but searches Simplicity by `AccountNumber`. The `accountNumber` and `debtorName` fields in the response are optional and only included when available.
 
 ---
 
