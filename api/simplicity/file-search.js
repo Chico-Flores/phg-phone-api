@@ -89,7 +89,17 @@ module.exports = async function handler(req, res) {
     }
 
     const debtor = data.Debtors[0];
-    const internalId = debtor.InternalId;
+    
+    // Extract InternalId from accountList (primary path used by AutoSearch)
+    let internalId = null;
+    if (debtor.accountList && Array.isArray(debtor.accountList) && debtor.accountList.length > 0) {
+      internalId = debtor.accountList[0].InternalId;
+    }
+    
+    // Fallback to top-level InternalId if present
+    if (!internalId && debtor.InternalId) {
+      internalId = debtor.InternalId;
+    }
 
     if (!internalId) {
       return res.status(200).json({ 
