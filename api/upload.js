@@ -68,6 +68,8 @@ module.exports = async function handler(req, res) {
     // ── Step 1: Clean and validate all records, group by phone ──
     // Map: cleanPhone → array of person objects
     const phoneMap = new Map();
+    // phone -> persons we tried to add, used by the duplicate-key retry below
+    const pendingByPhone = new Map();
 
     for (const record of phoneRecords) {
       try {
@@ -129,17 +131,23 @@ module.exports = async function handler(req, res) {
           }
         }
 
+        // Upsert rather than insert. Uploads run several batches in parallel,
+        // so another request can create this same phone between our read in
+        // Step 2 and this write. A bare insertOne loses that race with
+        // "E11000 duplicate key error ... index: _id_", which aborts the whole
+        // response even though the rest of the batch was written.
         operations.push({
-          insertOne: {
-            document: {
-              _id: cleanPhone,
-              phone: cleanPhone,
-              persons: uniquePersons,
-              createdAt: now,
-              updatedAt: now
-            }
+          updateOne: {
+            filter: { _id: cleanPhone },
+            update: {
+              $setOnInsert: { phone: cleanPhone, createdAt: now },
+              $set: { updatedAt: now },
+              $push: { persons: { $each: uniquePersons } }
+            },
+            upsert: true
           }
         });
+        pendingByPhone.set(cleanPhone, uniquePersons);
         inserted++;
       } else {
         // Phone exists — figure out which persons to add/update
@@ -193,12 +201,61 @@ module.exports = async function handler(req, res) {
     }
 
     // ── Step 4: Execute bulkWrite in one shot ──
+    // With ordered:false the driver still applies every operation it can, but
+    // it throws if ANY of them failed. Treat that as a partial success: keep
+    // the writes that landed, retry the ones that lost an upsert race, and
+    // only report what genuinely could not be written.
     if (operations.length > 0) {
-      await collection.bulkWrite(operations, { ordered: false });
+      try {
+        await collection.bulkWrite(operations, { ordered: false });
+      } catch (bulkError) {
+        const writeErrors = bulkError.writeErrors || bulkError.result?.writeErrors || [];
+        if (!writeErrors.length) throw bulkError;
+
+        const stillFailed = [];
+
+        for (const writeError of writeErrors) {
+          const failedOp = operations[writeError.index ?? writeError.err?.index];
+          const failedPhone = failedOp?.updateOne?.filter?._id;
+
+          // 11000 means another request created this phone first. The document
+          // exists now, so the same change applies cleanly as a plain update.
+          if (writeError.code === 11000 && failedPhone) {
+            try {
+              await collection.updateOne(
+                { _id: failedPhone },
+                {
+                  $set: { updatedAt: now },
+                  $push: { persons: { $each: pendingByPhone.get(failedPhone) || [] } }
+                }
+              );
+              continue;
+            } catch (retryError) {
+              writeError.retryMessage = retryError.message;
+            }
+          }
+          stillFailed.push({ phone: failedPhone, writeError });
+        }
+
+        for (const failure of stillFailed) {
+          const persons = pendingByPhone.get(failure.phone) || [];
+          inserted = Math.max(0, inserted - 1);
+          for (const person of persons) {
+            errors++;
+            failedRecords.push({
+              phone: failure.phone,
+              person,
+              error: failure.writeError.retryMessage || failure.writeError.errmsg || 'Write failed'
+            });
+          }
+        }
+      }
     }
 
-    // Get total count
-    const totalCount = await collection.countDocuments();
+    // estimatedDocumentCount() reads collection metadata; countDocuments()
+    // scans, which is several seconds on a collection this size and was being
+    // paid on every batch of every upload.
+    const totalCount = await collection.estimatedDocumentCount();
 
     return res.status(200).json({
       success: true,
